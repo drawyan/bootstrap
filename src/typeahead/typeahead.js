@@ -6,220 +6,226 @@ angular.module('ui.bootstrap.typeahead', [])
  * A helper service that can parse typeahead's syntax (string provided by users)
  * Extracted to a separate service for ease of unit testing
  */
-    .factory('typeaheadParser', ['$parse', function ($parse) {
+  .factory('typeaheadParser', ['$parse', function ($parse) {
 
-        //                      00000111000000000000022200000000000000003333333333333330000000000044000
-        var TYPEAHEAD_REGEXP = /^\s*(.*?)(?:\s+as\s+(.*?))?\s+for\s+(?:([\$\w][\$\w\d]*))\s+in\s+(.*)$/;
+  //                      00000111000000000000022200000000000000003333333333333330000000000044000
+  var TYPEAHEAD_REGEXP = /^\s*(.*?)(?:\s+as\s+(.*?))?\s+for\s+(?:([\$\w][\$\w\d]*))\s+in\s+(.*)$/;
 
-        return {
-            parse: function (input) {
+  return {
+    parse:function (input) {
 
-                var match = input.match(TYPEAHEAD_REGEXP), modelMapper, viewMapper, source;
-                if (!match) {
-                    throw new Error(
-                        "Expected typeahead specification in form of '_modelValue_ (as _label_)? for _item_ in _collection_'" +
-                            " but got '" + input + "'.");
-                }
+      var match = input.match(TYPEAHEAD_REGEXP), modelMapper, viewMapper, source;
+      if (!match) {
+        throw new Error(
+          "Expected typeahead specification in form of '_modelValue_ (as _label_)? for _item_ in _collection_'" +
+            " but got '" + input + "'.");
+      }
 
-                return {
-                    itemName: match[3],
-                    source: $parse(match[4]),
-                    viewMapper: $parse(match[2] || match[1]),
-                    modelMapper: $parse(match[1])
-                };
+      return {
+        itemName:match[3],
+        source:$parse(match[4]),
+        viewMapper:$parse(match[2] || match[1]),
+        modelMapper:$parse(match[1])
+      };
+    }
+  };
+}])
+
+  //options - min length
+  .directive('typeahead', ['$compile', '$q', '$document', 'typeaheadParser', function ($compile, $q, $document, typeaheadParser) {
+
+  var HOT_KEYS = [9, 13, 27, 38, 40];
+
+  return {
+    require:'ngModel',
+    link:function (originalScope, element, attrs, modelCtrl) {
+
+      var selected;
+
+      //minimal no of characters that needs to be entered before typeahead kicks-in
+      var minSearch = originalScope.$eval(attrs.typeaheadMinLength) || 1;
+
+      //expressions used by typeahead
+      var parserResult = typeaheadParser.parse(attrs.typeahead);
+
+      //should it restrict model values to the ones selected from the popup only?
+      var isEditable = originalScope.$eval(attrs.typeaheadEditable) !== false;
+
+      //create a child scope for the typeahead directive so we are not polluting original scope
+      //with typeahead-specific data (matches, query etc.)
+      var scope = originalScope.$new();
+      originalScope.$on('$destroy', function(){
+        scope.$destroy();
+      });
+
+      var resetMatches = function() {
+        scope.matches = [];
+        scope.activeIdx = -1;
+      };
+
+      scope.getMatchesAsync = function(inputValue) {
+        if (scope.userDoneSelect) {
+          scope.userDoneSelect = false;
+          return;
+        }
+
+        var locals = {$viewValue: inputValue};
+        $q.when(parserResult.source(scope, locals)).then(function(matches) {
+
+          //it might happen that several async queries were in progress if a user were typing fast
+          //but we are interested only in responses that correspond to the current view value
+          if (inputValue === modelCtrl.$viewValue) {
+            if (matches.length > 0) {
+
+              scope.activeIdx = 0;
+              scope.matches.length = 0;
+
+              //transform labels
+              for(var i=0; i<matches.length; i++) {
+                locals[parserResult.itemName] = matches[i];
+                scope.matches.push({
+                  label: parserResult.viewMapper(scope, locals),
+                  model: matches[i]
+                });
+              }
+
+              scope.query = inputValue;
+
+            } else {
+              resetMatches();
             }
-        };
-    }])
+          }
+        }, resetMatches);
+      };
 
-    //options - min length
-    .directive('typeahead', ['$compile', '$q', '$document', 'typeaheadParser', function ($compile, $q, $document, typeaheadParser) {
+      resetMatches();
 
-        var HOT_KEYS = [9, 13, 27, 38, 40];
+      //we need to propagate user's query so we can higlight matches
+      scope.query = undefined;
 
-        return {
-            require: 'ngModel',
-            link: function (originalScope, element, attrs, modelCtrl) {
+      //plug into $parsers pipeline to open a typeahead on view changes initiated from DOM
+      //$parsers kick-in on all the changes coming from the view as well as manually triggered by $setViewValue
+      modelCtrl.$parsers.push(function (inputValue) {
 
-                var selected;
+        resetMatches();
+        if (selected) {
+          return inputValue;
+        } else {
+          if (inputValue && inputValue.length >= minSearch) {
+              scope.getMatchesAsync(inputValue);
+          }
+        }
 
-                //minimal no of characters that needs to be entered before typeahead kicks-in
-                var minSearch = originalScope.$eval(attrs.typeaheadMinLength) || 1;
+        return isEditable ? inputValue : undefined;
+      });
 
-                //expressions used by typeahead
-                var parserResult = typeaheadParser.parse(attrs.typeahead);
+      modelCtrl.$render = function () {
+        var locals = {};
+        locals[parserResult.itemName] = selected || modelCtrl.$viewValue;
+        element.val(parserResult.viewMapper(scope, locals) || modelCtrl.$viewValue);
+        selected = undefined;
+      };
 
-                //should it restrict model values to the ones selected from the popup only?
-                var isEditable = originalScope.$eval(attrs.typeaheadEditable) !== false;
+      scope.select = function (activeIdx) {
+        //called from within the $digest() cycle
+        var locals = {};
+        locals[parserResult.itemName] = selected = scope.matches[activeIdx].model;
 
-                //create a child scope for the typeahead directive so we are not polluting original scope
-                //with typeahead-specific data (matches, query etc.)
-                var scope = originalScope.$new();
-                originalScope.$on('$destroy', function () {
-                    scope.$destroy();
-                });
+        modelCtrl.$setViewValue(parserResult.modelMapper(scope, locals));
+        modelCtrl.$render();
+      };
 
-                var resetMatches = function () {
-                    scope.matches = [];
-                    scope.activeIdx = -1;
-                };
+      //bind keyboard events: arrows up(38) / down(40), enter(13) and tab(9), esc(27)
+      element.bind('keydown', function (evt) {
 
-                scope.getMatchesAsync = function (inputValue) {
+        //typeahead is open and an "interesting" key was pressed
+        if (scope.matches.length === 0 || HOT_KEYS.indexOf(evt.which) === -1) {
+          return;
+        }
 
-                    var locals = {$viewValue: inputValue};
-                    $q.when(parserResult.source(scope, locals)).then(function (matches) {
+        evt.preventDefault();
 
-                        //it might happen that several async queries were in progress if a user were typing fast
-                        //but we are interested only in responses that correspond to the current view value
-                        if (inputValue === modelCtrl.$viewValue) {
-                            if (matches.length > 0) {
+        if (evt.which === 40) {
+          scope.activeIdx = (scope.activeIdx + 1) % scope.matches.length;
+          scope.$digest();
 
-                                scope.activeIdx = 0;
-                                scope.matches.length = 0;
+        } else if (evt.which === 38) {
+          scope.activeIdx = (scope.activeIdx ? scope.activeIdx : scope.matches.length) - 1;
+          scope.$digest();
 
-                                //transform labels
-                                for (var i = 0; i < matches.length; i++) {
-                                    locals[parserResult.itemName] = matches[i];
-                                    scope.matches.push({
-                                        label: parserResult.viewMapper(scope, locals),
-                                        model: matches[i]
-                                    });
-                                }
+        } else if (evt.which === 13 || evt.which === 9) {
+          scope.userDoneSelect = true;
+          scope.$apply(function () {
+            scope.select(scope.activeIdx);
+          });
 
-                                scope.query = inputValue;
+        } else if (evt.which === 27) {
+          scope.userDoneSelect = true;
+          evt.stopPropagation();
 
-                            } else {
-                                resetMatches();
-                            }
-                        }
-                    }, resetMatches);
-                };
+          resetMatches();
+          scope.$digest();
+        }
+      });
 
-                resetMatches();
+      $document.find('body').bind('click', function(){
 
-                //we need to propagate user's query so we can higlight matches
-                scope.query = undefined;
+        resetMatches();
+        scope.$digest();
+      });
 
-                //plug into $parsers pipeline to open a typeahead on view changes initiated from DOM
-                //$parsers kick-in on all the changes coming from the view as well as manually triggered by $setViewValue
-                modelCtrl.$parsers.push(function (inputValue) {
+      var tplElCompiled = $compile("<typeahead-popup matches='matches' active='activeIdx' select='select(activeIdx)' "+
+        "query='query'></typeahead-popup>")(scope);
+      element.after(tplElCompiled);
+    }
+  };
 
-                    resetMatches();
-                    if (selected) {
-                        return inputValue;
-                    } else {
-                        if (inputValue && inputValue.length >= minSearch) {
-                            scope.getMatchesAsync(inputValue);
-                        }
-                    }
+}])
 
-                    return isEditable ? inputValue : undefined;
-                });
+  .directive('typeaheadPopup', function () {
+    return {
+      restrict:'E',
+      scope:{
+        matches:'=',
+        query:'=',
+        active:'=',
+        select:'&'
+      },
+      replace:true,
+      templateUrl:'template/typeahead/typeahead.html',
+      link:function (scope, element, attrs) {
 
-                modelCtrl.$render = function () {
-                    var locals = {};
-                    locals[parserResult.itemName] = selected || modelCtrl.$viewValue;
-                    element.val(parserResult.viewMapper(scope, locals) || modelCtrl.$viewValue);
-                    selected = undefined;
-                };
-
-                scope.select = function (activeIdx) {
-                    //called from within the $digest() cycle
-                    var locals = {};
-                    locals[parserResult.itemName] = selected = scope.matches[activeIdx].model;
-
-                    modelCtrl.$setViewValue(parserResult.modelMapper(scope, locals));
-                    modelCtrl.$render();
-                };
-
-                //bind keyboard events: arrows up(38) / down(40), enter(13) and tab(9), esc(27)
-                element.bind('keydown', function (evt) {
-
-                    //typeahead is open and an "interesting" key was pressed
-                    if (scope.matches.length === 0 || HOT_KEYS.indexOf(evt.which) === -1) {
-                        return;
-                    }
-
-                    evt.preventDefault();
-
-                    if (evt.which === 40) {
-                        scope.activeIdx = (scope.activeIdx + 1) % scope.matches.length;
-                        scope.$digest();
-
-                    } else if (evt.which === 38) {
-                        scope.activeIdx = (scope.activeIdx ? scope.activeIdx : scope.matches.length) - 1;
-                        scope.$digest();
-
-                    } else if (evt.which === 13 || evt.which === 9) {
-                        scope.$apply(function () {
-                            scope.select(scope.activeIdx);
-                        });
-
-                    } else if (evt.which === 27) {
-                        evt.stopPropagation();
-
-                        resetMatches();
-                        scope.$digest();
-                    }
-                });
-
-                $document.find('body').bind('click', function () {
-
-                    resetMatches();
-                    scope.$digest();
-                });
-
-                var tplElCompiled = $compile("<typeahead-popup matches='matches' active='activeIdx' select='select(activeIdx)' " +
-                    "query='query'></typeahead-popup>")(scope);
-                element.after(tplElCompiled);
-            }
+        scope.isOpen = function () {
+          return scope.matches.length > 0;
         };
 
-    }])
-
-    .directive('typeaheadPopup', function () {
-        return {
-            restrict: 'E',
-            scope: {
-                matches: '=',
-                query: '=',
-                active: '=',
-                select: '&'
-            },
-            replace: true,
-            templateUrl: 'template/typeahead/typeahead.html',
-            link: function (scope, element, attrs) {
-
-                scope.isOpen = function () {
-                    return scope.matches.length > 0;
-                };
-
-                scope.isActive = function (matchIdx) {
-                    return scope.active == matchIdx;
-                };
-
-                scope.selectActive = function (matchIdx) {
-                    scope.active = matchIdx;
-                };
-
-                scope.selectMatch = function (activeIdx) {
-                    scope.select({activeIdx: activeIdx});
-                };
-            }
+        scope.isActive = function (matchIdx) {
+          return scope.active == matchIdx;
         };
-    })
 
-    .filter('typeaheadHighlight', function () {
-        return function (matchItem, query) {
-            return (query) ? matchItem.replace(new RegExp(query, 'gi'), '<strong>$&</strong>') : query;
+        scope.selectActive = function (matchIdx) {
+          scope.active = matchIdx;
         };
-    });
-angular.module("template/typeahead/typeahead.html", []).run(["$templateCache", function ($templateCache) {
-    $templateCache.put("template/typeahead/typeahead.html",
-        "<div class=\"dropdown clearfix\" ng-class=\"{open: isOpen()}\">" +
-            "    <ul class=\"typeahead dropdown-menu\">" +
-            "        <li ng-repeat=\"match in matches\" ng-class=\"{active: isActive($index) }\" ng-mouseenter=\"selectActive($index)\">" +
-            "            <a tabindex=\"-1\" ng-click=\"selectMatch($index)\" ng-bind-html-unsafe=\"match.label | typeaheadHighlight:query\"></a>" +
-            "        </li>" +
-            "    </ul>" +
-            "</div>");
+
+        scope.selectMatch = function (activeIdx) {
+          scope.select({activeIdx:activeIdx});
+        };
+      }
+    };
+  })
+
+  .filter('typeaheadHighlight', function() {
+    return function(matchItem, query) {
+      return (query) ? matchItem.replace(new RegExp(query, 'gi'), '<strong>$&</strong>') : query;
+    };
+  });
+angular.module("template/typeahead/typeahead.html", []).run(["$templateCache", function($templateCache){
+  $templateCache.put("template/typeahead/typeahead.html",
+    "<div class=\"dropdown clearfix\" ng-class=\"{open: isOpen()}\">" +
+    "    <ul class=\"typeahead dropdown-menu\">" +
+    "        <li ng-repeat=\"match in matches\" ng-class=\"{active: isActive($index) }\" ng-mouseenter=\"selectActive($index)\">" +
+    "            <a tabindex=\"-1\" ng-click=\"selectMatch($index)\" ng-bind-html-unsafe=\"match.label | typeaheadHighlight:query\"></a>" +
+    "        </li>" +
+    "    </ul>" +
+    "</div>");
 }]);
